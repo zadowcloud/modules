@@ -1,4 +1,4 @@
-/** Animepahe for Sora async JS. No DOM, Node APIs, dependencies or remote eval. */
+/** Animepahe for Sora/Eclipse async JS, version 1.0.1. No DOM, Node APIs or remote eval. */
 var Animepahe = (function () {
     var config = {
         baseUrl: 'https://animepahe.pw',
@@ -6,8 +6,10 @@ var Animepahe = (function () {
         // Optional: a valid session for this device/network. Never publish cookies.
         cookie: '',
         pageLimit: 500,
-        concurrency: 3
+        concurrency: 1,
+        searchCacheSeconds: 60
     };
+    var searchCache = {}, searchPending = {}, cooldowns = {};
 
     function log(where, error) {
         console.log('Animepahe ' + where + ': ' + (error.message || String(error)));
@@ -59,16 +61,16 @@ var Animepahe = (function () {
         return { base: 'https://' + m[1], id: m[2] };
     }
     async function request(url, referer, json) {
+        var host = origin(url);
+        if (cooldowns[host] > Date.now()) throw new Error('HTTP 429: Animepahe is temporarily rate limited; wait before retrying.');
         var headers = { 'User-Agent': config.userAgent, Referer: referer || config.baseUrl + '/' };
         if (json) { headers.Accept = 'application/json'; headers['X-Requested-With'] = 'XMLHttpRequest'; }
         if (config.cookie && /^https:\/\/animepahe\.(pw|com|si)(?:\/|$)/i.test(url)) headers.Cookie = config.cookie;
         var response;
         if (typeof fetchv2 === 'function') {
-            try { response = await fetchv2(url, headers, 'GET', null); }
-            catch (error) {
-                if (typeof fetch !== 'function') throw error;
-                response = await fetch(url, { headers: headers, method: 'GET' });
-            }
+            // Eclipse's fetch is an alias of fetchv2. Retrying through it replays
+            // the same failed request and can worsen a source rate limit.
+            response = await fetchv2(url, headers, 'GET', null);
         } else if (typeof fetch === 'function') response = await fetch(url, { headers: headers, method: 'GET' });
         else throw new Error('Sora fetch bridge is unavailable');
         if (response == null) throw new Error('Empty network response');
@@ -80,6 +82,17 @@ var Animepahe = (function () {
         else if (typeof response.body === 'string') body = response.body;
         else if (typeof response.data === 'string') body = response.data;
         else throw new Error('Unsupported fetch response shape');
+        if (status === 429) {
+            var retry = 30, responseHeaders = response.headers || {};
+            var rawRetry = typeof responseHeaders.get === 'function' ? responseHeaders.get('retry-after') : responseHeaders['retry-after'] || responseHeaders['Retry-After'];
+            if (rawRetry) {
+                var seconds = Number(rawRetry);
+                if (isFinite(seconds) && seconds >= 0) retry = Math.max(1, seconds);
+                else { var date = Date.parse(rawRetry); if (isFinite(date)) retry = Math.max(1, Math.ceil((date - Date.now()) / 1000)); }
+            }
+            cooldowns[host] = Date.now() + retry * 1000;
+            throw new Error('HTTP 429: Animepahe is temporarily rate limited; retry after ' + retry + ' seconds.');
+        }
         if (/cf-chl-|\/cdn-cgi\/challenge-platform|Sorry, you have been blocked|<title>\s*(?:Just a moment|Attention Required)/i.test(body))
             throw new Error('Cloudflare blocked this request. Verify site access on your device; this module cannot solve challenges.');
         if (status < 200 || status >= 300) throw new Error('HTTP ' + status + ' from ' + origin(url));
@@ -88,6 +101,60 @@ var Animepahe = (function () {
         try { data = JSON.parse(body); } catch (_) { throw new Error('Expected Animepahe JSON; received a non-JSON response'); }
         if (!data || !Array.isArray(data.data)) throw new Error('Animepahe API returned an unexpected schema');
         return data;
+    }
+    function searchPlan(keyword) {
+        var query = String(keyword).replace(/\s*[\[(]?(?:19|20)\d{2}[\])]?(?:\s*)$/, '').trim();
+        var apothecary = /^(?:the\s+)?apothecary\s+diaries\b/i.test(query);
+        if (apothecary || /^kusuriya\s+no\s+hitorigoto\b/i.test(query)) query = 'Kusuriya no Hitorigoto';
+        return { query: query, englishApothecary: apothecary };
+    }
+    async function searchRows(base, query) {
+        var key = base + '/api?m=search&q=' + encodeURIComponent(query.toLowerCase());
+        if (searchCache[key] && searchCache[key].expires > Date.now()) return searchCache[key].rows;
+        if (searchPending[key]) return await searchPending[key];
+        // Fetch one search response. Eclipse already tries title variants;
+        // paging every variant exhausted the source's request allowance.
+        searchPending[key] = (async function () {
+            var response = await request(base + '/api?m=search&q=' + encodeURIComponent(query), base + '/', true);
+            var keys = Object.keys(searchCache);
+            for (var i = 0; i < keys.length; i++) if (searchCache[keys[i]].expires <= Date.now()) delete searchCache[keys[i]];
+            if (Object.keys(searchCache).length >= 20) delete searchCache[Object.keys(searchCache)[0]];
+            searchCache[key] = { rows: response.data, expires: Date.now() + config.searchCacheSeconds * 1000 };
+            return response.data;
+        }());
+        try { return await searchPending[key]; }
+        finally { delete searchPending[key]; }
+    }
+    async function episodeRows(item, url) {
+        function api(target) {
+            return target.base + '/api?m=release&id=' + encodeURIComponent(target.id) + '&sort=episode_asc';
+        }
+        var failure, rows;
+        try {
+            rows = await pages(api(item), item.base + '/anime/' + item.id);
+            if (rows.length) return { item: item, rows: rows };
+        } catch (error) {
+            // A rate limit or challenge cannot be repaired by more requests.
+            if (/HTTP 429|Cloudflare/i.test(error.message || '')) throw error;
+            failure = error;
+        }
+        var html = await request(url, item.base + '/', false);
+        var candidates = [], tags = html.match(/<link\b[^>]*>/gi) || [];
+        for (var i = 0; i < tags.length; i++) {
+            var a = attrs(tags[i]);
+            if (/(?:^|\s)canonical(?:\s|$)/i.test(a.rel || '')) candidates.push(absolute(a.href, url));
+        }
+        candidates.push(absolute(meta(html, 'og:url'), url));
+        // Ignore homepage og:url values and foreign origins. Only a different,
+        // valid anime session can justify a second release-API request.
+        for (var j = 0; j < candidates.length; j++) {
+            var canonical;
+            try { canonical = anime(candidates[j]); } catch (_) { continue; }
+            if (canonical.base !== item.base || canonical.id === item.id) continue;
+            return { item: canonical, rows: await pages(api(canonical), url) };
+        }
+        if (failure) throw failure;
+        return { item: item, rows: rows || [] };
     }
     async function pages(firstUrl, referer) {
         var first = await request(firstUrl + '&page=1', referer, true);
@@ -164,7 +231,8 @@ var Animepahe = (function () {
         return out.sort(function (a, b) { return Number(a.av1) - Number(b.av1) || b.resolution - a.resolution; });
     }
     return { config: config, log: log, anime: anime, absolute: absolute, text: text, meta: meta, info: info,
-        request: request, pages: pages, players: players, resolve: resolve, origin: origin, unpack: unpack };
+        request: request, pages: pages, players: players, resolve: resolve, origin: origin, unpack: unpack,
+        searchPlan: searchPlan, searchRows: searchRows, episodeRows: episodeRows };
 }());
 
 async function searchResults(keyword) {
@@ -172,13 +240,16 @@ async function searchResults(keyword) {
         keyword = String(keyword || '').trim();
         if (!keyword) return JSON.stringify([]);
         var base = Animepahe.config.baseUrl.replace(/\/$/, '');
-        var rows = await Animepahe.pages(base + '/api?m=search&q=' + encodeURIComponent(keyword), base + '/');
+        var plan = Animepahe.searchPlan(keyword);
+        var rows = await Animepahe.searchRows(base, plan.query);
         var seen = {}, results = [];
         for (var i = 0; i < rows.length; i++) {
             var item = rows[i];
             if (!item.session || !item.title || seen[item.session]) continue;
             seen[item.session] = true;
-            results.push({ title: Animepahe.text(item.title), image: Animepahe.absolute(item.poster, base),
+            var title = Animepahe.text(item.title);
+            if (plan.englishApothecary) title = title.replace(/^Kusuriya\s+no\s+Hitorigoto(?=\s|$)/i, 'The Apothecary Diaries');
+            results.push({ title: title, image: Animepahe.absolute(item.poster, base),
                 href: base + '/anime/' + encodeURIComponent(item.session) });
         }
         return JSON.stringify(results);
@@ -202,11 +273,9 @@ async function extractDetails(url) {
 async function extractEpisodes(url) {
     try {
         var item = Animepahe.anime(url);
-        // Animepahe sessions can rotate. Use the canonical session from the page.
-        var html = await Animepahe.request(url, item.base + '/', false);
-        var canonical = Animepahe.meta(html, 'og:url');
-        if (canonical) item = Animepahe.anime(canonical);
-        var rows = await Animepahe.pages(item.base + '/api?m=release&id=' + encodeURIComponent(item.id) + '&sort=episode_asc', item.base + '/anime/' + item.id);
+        var result = await Animepahe.episodeRows(item, url);
+        item = result.item;
+        var rows = result.rows;
         var seen = {}, episodes = [];
         rows.sort(function (a, b) { return Number(a.episode) - Number(b.episode) || Number(a.id) - Number(b.id); });
         for (var i = 0; i < rows.length; i++) {
