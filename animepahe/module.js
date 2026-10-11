@@ -1,4 +1,4 @@
-/** Animepahe for Sora/Eclipse async JS, version 1.0.1. No DOM, Node APIs or remote eval. */
+/** Animepahe for Sora/Eclipse async JS, version 1.0.2. No DOM, Node APIs or remote eval. */
 var Animepahe = (function () {
     var config = {
         baseUrl: 'https://animepahe.pw',
@@ -75,6 +75,7 @@ var Animepahe = (function () {
         else throw new Error('Sora fetch bridge is unavailable');
         if (response == null) throw new Error('Empty network response');
         var status = response.status || response.statusCode || 200;
+        var responseHeaders = response.headers || {};
         var body;
         if (typeof response === 'string') body = response;
         else if (typeof response.text === 'function') body = await response.text();
@@ -83,7 +84,7 @@ var Animepahe = (function () {
         else if (typeof response.data === 'string') body = response.data;
         else throw new Error('Unsupported fetch response shape');
         if (status === 429) {
-            var retry = 30, responseHeaders = response.headers || {};
+            var retry = 30;
             var rawRetry = typeof responseHeaders.get === 'function' ? responseHeaders.get('retry-after') : responseHeaders['retry-after'] || responseHeaders['Retry-After'];
             if (rawRetry) {
                 var seconds = Number(rawRetry);
@@ -93,7 +94,10 @@ var Animepahe = (function () {
             cooldowns[host] = Date.now() + retry * 1000;
             throw new Error('HTTP 429: Animepahe is temporarily rate limited; retry after ' + retry + ' seconds.');
         }
-        if (/cf-chl-|\/cdn-cgi\/challenge-platform|Sorry, you have been blocked|<title>\s*(?:Just a moment|Attention Required)/i.test(body))
+        // Cloudflare's invisible JavaScript Detection also occurs in normal
+        // HTML. Its script URL alone does NOT mean the page is blocked.
+        var mitigation = typeof responseHeaders.get === 'function' ? responseHeaders.get('cf-mitigated') : responseHeaders['cf-mitigated'] || responseHeaders['Cf-Mitigated'];
+        if (mitigation === 'challenge' || /<title\b[^>]*>\s*(?:Just a moment|Attention Required)|<h[12]\b[^>]*>\s*Sorry, you have been blocked|\bid\s*=\s*["']challenge-(?:form|stage|running)["']/i.test(body))
             throw new Error('Cloudflare blocked this request. Verify site access on your device; this module cannot solve challenges.');
         if (status < 200 || status >= 300) throw new Error('HTTP ' + status + ' from ' + origin(url));
         if (!json) return body;
@@ -131,7 +135,7 @@ var Animepahe = (function () {
         }
         var failure, rows;
         try {
-            rows = await pages(api(item), item.base + '/anime/' + item.id);
+            rows = await pages(api(item), item.base + '/anime/' + item.id, true);
             if (rows.length) return { item: item, rows: rows };
         } catch (error) {
             // A rate limit or challenge cannot be repaired by more requests.
@@ -151,12 +155,12 @@ var Animepahe = (function () {
             var canonical;
             try { canonical = anime(candidates[j]); } catch (_) { continue; }
             if (canonical.base !== item.base || canonical.id === item.id) continue;
-            return { item: canonical, rows: await pages(api(canonical), url) };
+            return { item: canonical, rows: await pages(api(canonical), url, true) };
         }
         if (failure) throw failure;
         return { item: item, rows: rows || [] };
     }
-    async function pages(firstUrl, referer) {
+    async function pages(firstUrl, referer, keepOnRateLimit) {
         var first = await request(firstUrl + '&page=1', referer, true);
         var last = Number(first.last_page || 1);
         if (!isFinite(last) || last < 1 || Math.floor(last) !== last || last > config.pageLimit)
@@ -165,7 +169,15 @@ var Animepahe = (function () {
         for (var p = 2; p <= last; p += config.concurrency) {
             var work = [];
             for (var j = p; j <= last && j < p + config.concurrency; j++) work.push(request(firstUrl + '&page=' + j, referer, true));
-            var batch = await Promise.all(work);
+            var batch;
+            try { batch = await Promise.all(work); }
+            catch (error) {
+                if (keepOnRateLimit && all.length && /HTTP 429/i.test(error.message || '')) {
+                    log('extractEpisodes', new Error('Later episode pages were rate limited. Keeping ' + all.length + ' fetched episodes; later episodes require a retry after the rate limit clears.'));
+                    return all;
+                }
+                throw error;
+            }
             for (var k = 0; k < batch.length; k++) all = all.concat(batch[k].data);
         }
         return all;
