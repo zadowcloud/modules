@@ -9,7 +9,7 @@
   "streamType": "HLS",
   "quality": "1080p",
   "searchBaseUrl": "https://animepahe.pw/api?m=search&q=%s",
-  "scriptUrl": "https://example.invalid/animepahe/module.js",
+  "scriptUrl": "https://raw.githubusercontent.com/zadowcloud/modules/refs/heads/main/animepahe/module.js",
   "type": "anime",
   "downloadSupport": false,
   "asyncJS": true,
