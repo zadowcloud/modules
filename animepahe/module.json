@@ -2,7 +2,7 @@
   "sourceName": "Animepahe",
   "iconUrl": "https://animepahe.pw/favicon.ico",
   "author": { "name": "Custom module", "icon": "https://animepahe.pw/favicon.ico" },
-  "version": "1.0.1",
+  "version": "1.0.2",
   "language": "English (SUB/DUB)",
   "description": "Animepahe search, details, paginated episodes and Kwik HLS streams.",
   "baseUrl": "https://animepahe.pw/",
