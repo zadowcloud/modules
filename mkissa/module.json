@@ -9,7 +9,7 @@
   "streamType": "HLS",
   "quality": "Variable",
   "searchBaseUrl": "https://mkissa.to/anime?search=%s",
-  "scriptUrl": "https://example.invalid/mkissa/module.js",
+  "scriptUrl": "https://raw.githubusercontent.com/zadowcloud/modules/refs/heads/main/mkissa/module.js",
   "type": "anime",
   "downloadSupport": false,
   "asyncJS": true,
