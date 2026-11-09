@@ -1,0 +1,18 @@
+{
+  "sourceName": "MKissa",
+  "iconUrl": "https://mkissa.to/favicon-192x192.png?v=3",
+  "author": { "name": "Custom module", "icon": "https://mkissa.to/favicon-192x192.png?v=3" },
+  "version": "1.0.0",
+  "language": "English (SUB)",
+  "description": "MKissa SUB streams. Internal HLS first, with MP4Upload and OK.ru fallbacks. Client protocol build 186.",
+  "baseUrl": "https://mkissa.to/",
+  "streamType": "HLS",
+  "quality": "Variable",
+  "searchBaseUrl": "https://mkissa.to/anime?search=%s",
+  "scriptUrl": "https://example.invalid/mkissa/module.js",
+  "type": "anime",
+  "downloadSupport": false,
+  "asyncJS": true,
+  "streamAsyncJS": false,
+  "softsub": false
+}
